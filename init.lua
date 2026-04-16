@@ -70,8 +70,17 @@ local function sendRequest(msg)
    end
 end
 
+local closedCount = 0
+
+local meetingPermissions = nil
+local meetingState = nil
+
 local function onTeamsMessage(wsType, message)
-   MSTeams.logger.d("Teams WebSocket "..wsType, message)
+   MSTeams.logger.v("Teams WebSocket "..wsType, message)
+
+   if wsType ~= "closed" then
+      closedCount = 0
+   end
 
    if wsType == "open" then
       MSTeams.logger.d("Connected to Teams local API")
@@ -88,36 +97,51 @@ local function onTeamsMessage(wsType, message)
          hs.settings.set("MSTeams.teamsToken", parsed.tokenRefresh)
       end
 
-      -- if parsed.meetingUpdate and parsed.meetingUpdate.meetingPermissions and parsed.meetingUpdate.meetingPermissions.canPair and not teamsPairing then
+      if parsed.meetingUpdate then
+         if parsed.meetingUpdate.meetingPermissions then
+            meetingPermissions = parsed.meetingUpdate.meetingPermissions
+            MSTeams.logger.d("Got new meeting permissions", hs.inspect.inspect(meetingPermissions))
+         
+            if parsed.meetingUpdate.meetingPermissions.canPair and not teamsPairing then
+               MSTeams.logger.d("Sending pairing request")
+               teamsPairing = true
+               MSTeams:pair()
+            end
+         end
 
-      --    MSTeams.logger.d("Sending pairing request")
-      --    teamsPairing = true
-      --    sendRequest('"action":"pair","parameters":{}')
-      -- end
+         if parsed.meetingUpdate.meetingState then
+            meetingState = parsed.meetingUpdate.meetingState
+            
+            MSTeams.logger.d("Got new meeting state", hs.inspect.inspect(meetingState))
+         end
+      end
 
       if parsed.response and parsed.response == "Pairing response resulted in no action" then 
          MSTeams.logger.d("Didn't pair. Will try again next meeting.")
          teamsPairing = false
       end
 
-      if parsed.meetingUpdate and parsed.meetingUpdate.meetingState then
-         local ms = parsed.meetingUpdate.meetingState
-         
-         MSTeams.logger.d("Got new meeting state", hs.inspect.inspect(ms))
-      end
-
    elseif wsType == "closed" then
       teamsWebsocket = nil
       teamsPairing = false
       if running then
-         MSTeams.logger.d("Teams WebSocket closed, probably because this app was blocked from the Third-party app API in teams.")
-         MSTeams.logger.d("Go to Settings > Privacy > Third-party app API > Manage API and remove the application from block.")
+         closedCount = closedCount + 1
+         if closedCount > 3 then
+            MSTeams.logger.w("Teams WebSocket closed multiple times in a row")
+            MSTeams.logger.w("This likely means this app was blocked from the Third-party app API in teams.")
+            MSTeams.logger.w("Go to Settings > Privacy > Third-party app API > Manage API and remove the application from block.")
+            MSTeams.logger.w("Then restart this spoon.")
+            MSTeams:stop()
+         else
+            MSTeams.logger.i("Teams not available, retrying in 5 seconds")
+            hs.timer.doAfter(5, connectToTeams)
+         end
       end
 
    elseif wsType == "fail" then
       teamsWebsocket = nil
       if running then
-         MSTeams.logger.d("Teams not available, retrying in 30 seconds")
+         MSTeams.logger.i("Teams not available, retrying in 30 seconds")
          hs.timer.doAfter(30, connectToTeams)
       end
    end
@@ -166,13 +190,15 @@ end
 --- Returns:
 ---  * The spoon.MSTeams object
 function MSTeams:start()
-   MSTeams.logger.d("Start")
+   MSTeams.logger.v("MSTeams:start()")
 
    if(not running) then
       running = true
       if(not teamsWebsocket) then
          connectToTeams()
       end
+   else
+      MSTeams.logger.w("MSTeams already started")
    end
  
    return self
@@ -188,17 +214,34 @@ end
 --- Returns:
 ---  * The spoon.MSTeams object
 function MSTeams:stop()
-   MSTeams.logger.d("Stop")
+   MSTeams.logger.v("MSTeams:stop()")
+
    running = false
+   closedCount = 0
+   meetingPermissions = nil
+   meetingState = nil
+
    disconnectFromTeams()
+
    return self
 end
 
+--- MSTeams:restart()-> spoon.MSTeams 
+--- Method
+--- Restarts a MSTeams object
+---
+--- Parameters:
+---  * None
+---
+--- Returns:
+---  * The spoon.MSTeams object
+function MSTeams:restart()
+   return self:stop():start()
+end
 
-MSTeams.actions = {}
 
 -- query-state
-function MSTeams.actions:queryState()
+function MSTeams:queryState()
    if running then
       sendRequest('"action":"query-state","parameters":{}')
    end
@@ -206,9 +249,46 @@ function MSTeams.actions:queryState()
    return self
 end
 
+local permission = {
+   canLeave = "canLeave",
+   canPair = "canPair",
+   canReact = "canReact",
+   canStopSharing = "canStopSharing",
+   canToggleBlur = "canToggleBlur",
+   canToggleChat = "canToggleChat",
+   canToggleHand = "canToggleHand",
+   canToggleMute = "canToggleMute",
+   canToggleShareTray = "canToggleShareTray",
+   canToggleVideo = "canToggleVideo"
+}
+
+local function canAct(requiredPermission)
+   if not running then
+      MSTeams.logger.w("spoon MSTeams must be running to perform actions. Run MSTeams:start()")
+      return false
+   elseif not teamsWebsocket then
+      MSTeams.logger.w("Not connected to teams")
+      return false
+   elseif not meetingPermissions then
+      MSTeams.logger.w("Not currently in a teams meeting")
+      return false
+   elseif requiredPermission then
+      if not permission[requiredPermission] then
+         MSTeams.logger.e("Invalid permission")
+         return false
+      elseif not meetingPermissions[requiredPermission] then
+         MSTeams.logger.w("Don't have necessary permission in current meeting.", requiredPermission.." =", meetingPermissions[requiredPermission])
+         return false
+      end
+   end
+
+
+   return true
+end
+
 -- pair
-function MSTeams.actions:pair()
-   if running then
+function MSTeams:pair()
+   if canAct(permission.canPair) then
       sendRequest('"action":"pair","parameters":{}')
    end
 
@@ -216,10 +296,9 @@ function MSTeams.actions:pair()
 end
 
 
-
 -- toggle-mute
-function MSTeams.actions:toggleMute()
-   if running then
+function MSTeams:toggleMute()
+   if canAct(permission.canToggleMute) then
       sendRequest('"action":"toggle-mute","parameters":{}')
    end
 
@@ -227,8 +306,8 @@ function MSTeams.actions:toggleMute()
 end
 
 -- mute
-function MSTeams.actions:mute()
-   if running then
+function MSTeams:mute()
+   if canAct(permission.canToggleMute) then
       sendRequest('"action":"mute","parameters":{}')
    end
 
@@ -236,8 +315,8 @@ function MSTeams.actions:mute()
 end
 
 -- unmute
-function MSTeams.actions:unmute()
-   if running then
+function MSTeams:unmute()
+   if canAct(permission.canToggleMute) then
       sendRequest('"action":"unmute","parameters":{}')
    end
 
@@ -247,8 +326,8 @@ end
 
 
 -- toggle-video
-function MSTeams.actions:toggleVideo()
-   if running then
+function MSTeams:toggleVideo()
+   if canAct(permission.canToggleVideo) then
       sendRequest('"action":"toggle-video","parameters":{}')
    end
 
@@ -256,8 +335,8 @@ function MSTeams.actions:toggleVideo()
 end
 
 -- show-video
-function MSTeams.actions:showVideo()
-   if running then
+function MSTeams:showVideo()
+   if canAct(permission.canToggleVideo) then
       sendRequest('"action":"show-video","parameters":{}')
    end
 
@@ -265,8 +344,8 @@ function MSTeams.actions:showVideo()
 end
 
 -- hide-video
-function MSTeams.actions:hideVideo()
-   if running then
+function MSTeams:hideVideo()
+   if canAct(permission.canToggleVideo) then
       sendRequest('"action":"hide-video","parameters":{}')
    end
 
@@ -275,8 +354,8 @@ end
 
 
 -- stop-sharing
-function MSTeams.actions:stopSharing()
-   if running then
+function MSTeams:stopSharing()
+   if canAct(permission.canStopSharing) then
       sendRequest('"action":"stop-sharing","parameters":{}')
    end
    return self
@@ -284,8 +363,8 @@ end
 
 
 -- toggle-background-blur
-function MSTeams.actions:toggleBlurBackground()
-   if running then
+function MSTeams:toggleBlurBackground()
+   if canAct(permission.canToggleBlur) then
       sendRequest('"action":"toggle-background-blur","parameters":{}')
    end
 
@@ -293,8 +372,8 @@ function MSTeams.actions:toggleBlurBackground()
 end
 
 -- blur-background
-function MSTeams.actions:blurBackground()
-   if running then
+function MSTeams:blurBackground()
+   if canAct(permission.canToggleBlur) then
       sendRequest('"action":"blur-background","parameters":{}')
    end
 
@@ -302,8 +381,8 @@ function MSTeams.actions:blurBackground()
 end
 
 -- unblur-background
-function MSTeams.actions:unblurBackground()
-   if running then
+function MSTeams:unblurBackground()
+   if canAct(permission.canToggleBlur) then
       sendRequest('"action":"unblur-background","parameters":{}')
    end
 
@@ -312,8 +391,8 @@ end
 
 
 -- toggle-hand
-function MSTeams.actions:toggleHand()
-   if running then
+function MSTeams:toggleHand()
+   if canAct(permission.canToggleHand) then
       sendRequest('"action":"toggle-hand","parameters":{}')
    end
 
@@ -321,8 +400,8 @@ function MSTeams.actions:toggleHand()
 end
 
 -- raise-hand
-function MSTeams.actions:raiseHand()
-   if running then
+function MSTeams:raiseHand()
+   if canAct(permission.canToggleHand) then
       sendRequest('"action":"raise-hand","parameters":{}')
    end
 
@@ -330,63 +409,79 @@ function MSTeams.actions:raiseHand()
 end
 
 -- lower-hand
-function MSTeams.actions:lowerHand()
-   if running then
+function MSTeams:lowerHand()
+   if canAct(permission.canToggleHand) then
       sendRequest('"action":"lower-hand","parameters":{}')
    end
 
    return self
 end
 
-local reactionConstants = {like="like", love="love", applause="applause", laugh="laugh" }
--- send-reaction {"type":"like"|"love"|"applause"|"laugh"}
+-- send-reaction {"type":"like"}
+function MSTeams:reactLike(reaction)
+   if canAct(permission.canReact) then
+      sendRequest('"action":"send-reaction","parameters":{"type":"like"}')
+   end
 
-function MSTeams.actions:sendReaction(reaction)
-   if running then
-      local reactionType = reactionConstants[reaction]
-      if reactionType then
-         sendRequest('"action":"send-reaction","parameters":{"type":"'..reactionType..'"}')
-      else
-         --Invalid reaction
-      end
+   return self
+end
+
+
+-- send-reaction {"type":"love"}
+function MSTeams:reactLove(reaction)
+   if canAct(permission.canReact) then
+      sendRequest('"action":"send-reaction","parameters":{"type":"love"}')
+   end
+
+   return self
+end
+
+-- send-reaction {"type":"applause"}
+function MSTeams:reactApplause(reaction)
+   if canAct(permission.canReact) then
+      sendRequest('"action":"send-reaction","parameters":{"type":"applause"}')
+   end
+
+   return self
+end
+
+-- send-reaction {"type":"laugh"}
+function MSTeams:reactLaugh(reaction)
+   if canAct(permission.canReact) then
+      sendRequest('"action":"send-reaction","parameters":{"type":"laugh"}')
    end
 
    return self
 end
 
 -- leave-call
-function MSTeams.actions:leaveCall()
-   if running then
+function MSTeams:leaveCall()
+   if canAct(permission.canLeave) then
       sendRequest('"action":"leave-call","parameters":{}')
    end
 
    return self
 end
 
-local uiConstants = {chat="chat", shareTray="share-tray"}
 -- toggle-ui {"type":"chat"}
-
-function MSTeams.actions:toggleUI(element)
-   if running then
-      local uiElement = nil
-      for _, v in pairs(uiConstants) do
-         if(v==element) then uiElement=element end
-      end
-      print(uiElement)
-      if uiElement then
-         sendRequest('"action":"toggle-ui","parameters":{"type":"'..uiElement..'"}')
-      else
-         --Invalid reaction
-      end
+function MSTeams:toggleChat()
+   if canAct(permission.canToggleChat) then
+         sendRequest('"action":"toggle-ui","parameters":{"type":"chat"}')
    end
+   return self
+end
 
+-- toggle-ui {"type":"share tray"}
+function MSTeams:toggleShareTray()
+   if canAct(permission.canToggleShareTray) then
+         sendRequest('"action":"toggle-ui","parameters":{"type":"share tray"}')
+   end
    return self
 end
 
 
-
-function MSTeams.actions:customRequest(msg)
-   if running then
+function MSTeams:customRequest(msg)
+   if canAct() then
       sendRequest(msg)
    end
 
@@ -401,17 +496,17 @@ end
 
 return setmetatable({}, {
    __index=function (_, k)
-      if k=="reaction" then
-         return reactionConstants
-      elseif k=="ui" then
-         return uiConstants
+      if k=="state" then
+         return meetingState
+      elseif k=="permissions" then
+         return meetingPermissions
       else
          return MSTeams[k]
       end
    end,
    __newindex=function (_, k, v)
-      if k=="reaction" or k=="ui" or k=="actions" then
-         --skip readonly constants
+      if k=="state" or k=="permissions" then
+         --skip readonly fields
       else
          MSTeams[k]=v
       end
