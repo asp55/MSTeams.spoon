@@ -34,6 +34,18 @@ MSTeams.license = "MIT - https://opensource.org/licenses/MIT"
 MSTeams.logger = hs.logger.new('MSTeams')
 
 
+
+--- MSTeams.permissions
+--- Variable
+--- Read-only table of meetingPermissions provided by Teams or nil if not connected to teams.
+local meetingPermissions = nil
+
+--- MSTeams.state
+--- Variable
+--- Read-only table of meetingState properties provided by Teams or nil if not connected to teams.
+local meetingState = nil
+
+
 -- private variable to track if spoon is already running or not. (Makes it easier to find local variables)
 local running = false
 
@@ -77,9 +89,6 @@ local function sendRequest(msg)
 end
 
 local closedCount = 0
-
-local meetingPermissions = nil
-local meetingState = nil
 
 local function onTeamsMessage(wsType, message)
    MSTeams.logger.v("Teams WebSocket "..wsType, message)
