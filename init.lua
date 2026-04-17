@@ -3,10 +3,6 @@
 --- A Spoon to interact with Microsoft Teams via the local websocket API
 
 
---We'll store some stuff in an internal table
-
-local _internal = {}
-
 
 -- create a namespace
 
