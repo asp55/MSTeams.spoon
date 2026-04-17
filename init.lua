@@ -45,6 +45,7 @@ local meetingPermissions = nil
 --- Read-only table of meetingState properties provided by Teams or nil if not connected to teams.
 local meetingState = nil
 
+local updateCallback = function () end
 
 -- private variable to track if spoon is already running or not. (Makes it easier to find local variables)
 local running = false
@@ -129,9 +130,11 @@ local function onTeamsMessage(wsType, message)
             
             MSTeams.logger.d("Got new meeting state", hs.inspect.inspect(meetingState))
          end
+
+         updateCallback()
       end
 
-      if parsed.response and parsed.response == "Pairing response resulted in no action" then 
+      if parsed.response and parsed.response == "Pairing response resulted in no action" then
          MSTeams.logger.d("Didn't pair. Will try again next meeting.")
          teamsPairing = false
       end
@@ -254,7 +257,30 @@ function MSTeams:restart()
    return self:stop():start()
 end
 
+--- MSTeams:onUpdate(callback)-> spoon.MSTeams 
+--- Method
+--- Runs a callback whenever state or permissions are updated
+---
+--- Parameters:
+---  * callback - the callback function to run on update; 
+---
+--- Returns:
+---  * The spoon.MSTeams object
+function MSTeams:onUpdate(callback)
 
+   if type(callback)=='function' then
+      updateCallback = callback
+   else
+      error('callback must be a function',3)
+   end
+
+   return self
+end
+
+
+-------------------------------------------
+-- Teams Command Methods
+-------------------------------------------
 -- query-state
 
 --- MSTeams:queryState()-> spoon.MSTeams 
@@ -760,6 +786,9 @@ function MSTeams:customRequest(action, parameters)
 end
 
 
+-------------------------------------------
+-- End of Teams Command Methods
+-------------------------------------------
 
 -------------------------------------------
 -- End of Methods
